@@ -1,29 +1,24 @@
-var settings = {
+const settings = {
     mqtt: {
         host: process.env.MQTT_HOST || '',
         user: process.env.MQTT_USER || '',
         password: process.env.MQTT_PASS || '',
         clientId: process.env.MQTT_CLIENT_ID || null
     },
-    keepalive: {
-        topic: process.env.KEEP_ALIVE_TOPIC || 'keep_alive',
-        message: process.env.KEEP_ALIVE_MESSAGE || 'keep_alive'
-    },
     debug: process.env.DEBUG_MODE || false,
     auth_key: process.env.AUTH_KEY || '',
     http_port: process.env.PORT || 5000
 }
 
-var mqtt = require('mqtt');
-var express = require('express');
-var bodyParser = require('body-parser');
-var multer = require('multer');
+const mqtt = require('mqtt');
+const express = require('express');
+const bodyParser = require('body-parser');
+const multer = require('multer');
 
-var app = express();
+const app = express();
 
 function getMqttClient() {
-
-    var options = {
+    const options = {
         username: settings.mqtt.user,
         password: settings.mqtt.password
     };
@@ -35,16 +30,14 @@ function getMqttClient() {
     return mqtt.connect(settings.mqtt.host, options);
 }
 
-var mqttClient = getMqttClient();
+const globalMqttClient = getMqttClient();
 
 app.set('port', settings.http_port);
-app.use(bodyParser.json());
+app.use(bodyParser.text({ type: 'text/plain' }))
 
 function logRequest(req, res, next) {
-    var ip = req.headers['x-forwarded-for'] ||
-        req.connection.remoteAddress;
-    var message = 'Received request [' + req.originalUrl +
-        '] from [' + ip + ']';
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    var message = 'Received request [' + req.originalUrl + '] from [' + ip + ']';
 
     if (settings.debug) {
         message += ' with payload [' + JSON.stringify(req.body) + ']';
@@ -56,94 +49,42 @@ function logRequest(req, res, next) {
     next();
 }
 
-function authorizeUser(req, res, next) {
-    if (settings.auth_key && req.body['key'] != settings.auth_key) {
-        console.log('Request is not authorized.');
-        res.sendStatus(401);
+
+app.use('/', logRequest, function (req, res) {
+    const topic = req.path.replace(/^\//g, '');
+    if (req.method === 'PUT') {
+        globalMqttClient.publish(topic, req.body, {retain: true });
+        res.sendStatus(200);
     }
-    else {
-        next();
+    else if (req.method === 'DELETE') {
+        globalMqttClient.publish(topic, null, {retain: true});
+        res.sendStatus(200);
     }
-}
-
-function checkSingleFileUpload(req, res, next) {
-    if (req.query.single) {
-        var upload = multer().single(req.query.single);
-
-        upload(req, res, next);
+    else if (req.method === 'POST') {
+        globalMqttClient.publish(topic, req.body);
+        res.sendStatus(200);
     }
-    else {
-        next();
-    }
-}
-
-function checkMessagePathQueryParameter(req, res, next) {
-    if (req.query.path) {
-        req.body.message = req.body[req.query.path];
-    }
-    next();
-}
-
-function checkTopicQueryParameter(req, res, next) {
-
-    if (req.query.topic) {
-        req.body.topic = req.query.topic;
-    }
-
-    next();
-}
-
-function ensureTopicSpecified(req, res, next) {
-    if (!req.body.topic) {
-        res.status(500).send('Topic not specified');
-    }
-    else {
-        next();
-    }
-}
-
-app.get('/keep_alive/', logRequest, function (req, res) {
-    mqttClient.publish(settings.keepalive.topic, settings.keepalive.message);
-    res.sendStatus(200);
-});
-
-app.post('/post/', logRequest, authorizeUser, checkSingleFileUpload, checkMessagePathQueryParameter, checkTopicQueryParameter, ensureTopicSpecified, function (req, res) {
-    mqttClient.publish(req.body['topic'], req.body['message']);
-    res.sendStatus(200);
-});
-
-app.get('/subscribe/', logRequest, authorizeUser, function (req, res) {
-
-    var topic = req.query.topic;
-
-    if (!topic) {
-        res.status(500).send('topic not specified');
-    }
-    else {
-        // get a new mqttClient
-        // so we dont constantly add listeners on the 'global' mqttClient
-        var mqttClient = getMqttClient();
-
-        mqttClient.on('connect', function () {
-            mqttClient.subscribe(topic);
+    else if (req.method === "GET") {
+        const localMqttClient = getMqttClient();
+        localMqttClient.on('connect', function () {
+            localMqttClient.subscribe(topic);
         });
 
-        mqttClient.on('message', function (t, m) {
-            if (t === topic) {
-                res.write(m);
-            }
+        localMqttClient.on('message', function (t, m) {
+            res.send(m.toString());
+            res.end();
+            localMqttClient.end();
         });
-
-        req.on("close", function () {
-            mqttClient.end();
+        res.setTimeout(1 * 500, () => {
+            res.end();
+            localMqttClient.end();
         });
-
-        req.on("end", function () {
-            mqttClient.end();
-        });
+    }
+    else {
+        res.status(500).send("wrong method");
     }
 });
 
 app.listen(app.get('port'), function () {
     console.log('Node app is running on port', app.get('port'));
-});
+})//.setTimeout(1 * 1000);
